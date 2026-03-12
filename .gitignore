@@ -68,3 +68,19 @@ generate_pdf.py
 # Debug logs
 firebase-debug.log
 firebase-debug.*.log
+
+# Generated / site-specific scripts (not part of the generic tool)
+scripts/mobile_analysis.py
+
+# Audit reports with alternate naming conventions
+sitemap-validation-report.md
+*-validation-report.md
+
+# Temporary download directories
+claude-ads-main/
+claude-seo-main/
+
+# Root-level duplicate media files (originals live in screenshots/)
+Cover Image.jpeg
+seo audit demo.gif
+seo command demo.gif

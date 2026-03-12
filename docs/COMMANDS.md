@@ -50,7 +50,7 @@ Deep single-page analysis.
 
 ### `/seo technical <url>`
 
-Technical SEO audit across 8 categories.
+Technical SEO audit across 9 categories.
 
 **Example:**
 ```
@@ -66,6 +66,7 @@ Technical SEO audit across 8 categories.
 6. Core Web Vitals (LCP, INP, CLS)
 7. Structured Data
 8. JavaScript Rendering
+9. IndexNow Protocol
 
 ---
 
