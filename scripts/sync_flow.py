@@ -18,6 +18,13 @@ import urllib.request
 API_ROOT = "https://api.github.com/repos/AgriciDaniel/flow/contents"
 _ALLOWED_HOST = "api.github.com"
 _SIZE_LIMIT = 5 * 1024 * 1024  # 5 MB
+
+
+def _validate_github_url(url):
+    """Abort if url does not target the expected GitHub API host."""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.netloc != _ALLOWED_HOST:
+        raise ValueError(f"Blocked request to unexpected host: {parsed.netloc!r}")
 PROMPT_STAGES = ["find", "leverage", "optimize", "win", "local"]
 STATIC_FILES = [
     ("docs/01-framework/flow-framework.md", "flow-framework.md"),
@@ -69,6 +76,7 @@ def content_url(path, ref):
 
 def api_get(path, ref, headers):
     url = content_url(path, ref)
+    _validate_github_url(url)
     request = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=15) as response:
@@ -174,8 +182,34 @@ def prompt_readme(rows):
     return "\n".join(lines) + "\n"
 
 
+def _sha256(content):
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _atomic_write(path, content):
+    """Write content atomically via a temp file in the same directory."""
+    dir_ = path.parent
+    fd, tmp = tempfile.mkstemp(dir=dir_, suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(content)
+        shutil.move(tmp, path)
+    except Exception:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def record_write(root, path, content, dry_run, changes):
+    resolved = path.resolve()
+    root_resolved = root.resolve()
+    if not str(resolved).startswith(str(root_resolved) + os.sep):
+        raise ValueError(f"Path traversal blocked: {resolved} is outside {root_resolved}")
+
     rel = path.relative_to(root).as_posix()
+    changes.setdefault("hashes", {})[rel] = _sha256(content)
     if path.exists():
         current = path.read_text(encoding="utf-8")
         bucket = "unchanged" if current == content else "updated"
@@ -185,7 +219,7 @@ def record_write(root, path, content, dry_run, changes):
     print(f"{bucket}: {rel}", file=sys.stderr)
     if not dry_run and bucket != "unchanged":
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        _atomic_write(path, content)
 
 
 def sync(args):
@@ -193,7 +227,7 @@ def sync(args):
     refs = root / "skills" / "seo-flow" / "references"
     today = datetime.date.today().isoformat()
     headers = _base_headers()
-    changes = {"added": [], "updated": [], "unchanged": []}
+    changes = {"added": [], "updated": [], "unchanged": [], "hashes": {}}
     prompt_rows = []
 
     for source, target in STATIC_FILES:

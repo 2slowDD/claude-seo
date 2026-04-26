@@ -138,3 +138,33 @@ def test_authed_headers_degrades_when_gh_missing(monkeypatch):
     monkeypatch.setattr(sf.subprocess, "run", _fake_run)
     headers = sf._authed_headers()
     assert "Authorization" not in headers
+
+
+# ── Task 3 tests ──────────────────────────────────────────────────────────────
+
+def test_validate_github_url_blocks_non_github_host():
+    """_validate_github_url must reject any host other than api.github.com (VULN-A10)."""
+    sf = _load_sync_flow_module()
+    import pytest
+    with pytest.raises(ValueError, match="Blocked"):
+        sf._validate_github_url("https://evil.example.com/repos/AgriciDaniel/flow/contents/file.md")
+
+
+def test_validate_github_url_allows_github_api():
+    """_validate_github_url must not raise for api.github.com URLs (VULN-A10)."""
+    sf = _load_sync_flow_module()
+    # Should not raise
+    sf._validate_github_url("https://api.github.com/repos/AgriciDaniel/flow/contents/README.md")
+
+
+def test_record_write_blocks_path_traversal(tmp_path):
+    """record_write must raise ValueError if path escapes the root directory (VULN-A03)."""
+    sf = _load_sync_flow_module()
+    root = tmp_path / "root"
+    root.mkdir()
+    # Path outside root
+    escape_path = tmp_path / "escaped_file.txt"
+    changes = {"added": [], "updated": [], "unchanged": [], "hashes": {}}
+    import pytest
+    with pytest.raises(ValueError, match="Path traversal blocked"):
+        sf.record_write(root, escape_path, "bad content", dry_run=False, changes=changes)
