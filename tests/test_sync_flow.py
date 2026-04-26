@@ -176,3 +176,15 @@ def test_record_write_blocks_path_traversal(tmp_path):
     import pytest
     with pytest.raises(ValueError, match="Path traversal blocked"):
         sf.record_write(root, escape_path, "bad content", dry_run=False, changes=changes)
+
+
+# ── Task 4 tests ──────────────────────────────────────────────────────────────
+
+def test_sha256_is_deterministic():
+    """_sha256 must return the same hash for the same input, SHA-256 format (VULN-A04)."""
+    sf = _load_sync_flow_module()
+    assert sf._sha256("hello") == sf._sha256("hello")
+    assert sf._sha256("hello") != sf._sha256("world")
+    digest = sf._sha256("test")
+    assert len(digest) == 64
+    assert all(c in "0123456789abcdef" for c in digest)

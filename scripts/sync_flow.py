@@ -30,6 +30,7 @@ STATIC_FILES = [
     ("docs/01-framework/flow-framework.md", "flow-framework.md"),
     ("docs/10-references/bibliography.md", "bibliography.md"),
 ]
+LOCK_REL = pathlib.Path("skills") / "seo-flow" / "references" / "flow-prompts.lock"
 
 
 def script_root():
@@ -248,6 +249,48 @@ def sync(args):
             record_write(root, target, content, args.dry_run, changes)
 
     record_write(root, refs / "prompts" / "README.md", prompt_readme(prompt_rows), args.dry_run, changes)
+
+    # Generate SHA-256 lockfile
+    lock_path = root / LOCK_REL
+    lock_lines = [
+        "# flow-prompts.lock — SHA-256 baseline for synced FLOW prompts",
+        f"# Generated: {today} | Ref: {args.ref or 'HEAD'}",
+        "",
+    ]
+    for rel in sorted(changes["hashes"]):
+        lock_lines.append(f"{changes['hashes'][rel]}  {rel}")
+    lock_content = "\n".join(lock_lines) + "\n"
+
+    # Diff against existing lockfile and print drift report
+    if lock_path.exists():
+        old_lock = lock_path.read_text(encoding="utf-8")
+        old_hashes = {}
+        for line in old_lock.splitlines():
+            if line and not line.startswith("#"):
+                parts = line.split("  ", 1)
+                if len(parts) == 2:
+                    old_hashes[parts[1]] = parts[0]
+        drift = []
+        for rel, sha in sorted(changes["hashes"].items()):
+            old_sha = old_hashes.get(rel)
+            if old_sha is None:
+                drift.append(f"  ADDED   {rel}")
+            elif old_sha != sha:
+                drift.append(f"  CHANGED {rel}")
+        for rel in sorted(old_hashes):
+            if rel not in changes["hashes"]:
+                drift.append(f"  REMOVED {rel}")
+        if drift:
+            print("Lockfile drift detected:", file=sys.stderr)
+            for line in drift:
+                print(line, file=sys.stderr)
+        else:
+            print("Lockfile: no drift (all hashes match baseline)", file=sys.stderr)
+
+    # Write lockfile (excluded from its own hashes tracking)
+    record_write(root, lock_path, lock_content, args.dry_run, changes)
+    changes["hashes"].pop(LOCK_REL.as_posix(), None)
+
     return changes
 
 
