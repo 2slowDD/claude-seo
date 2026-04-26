@@ -57,9 +57,9 @@ def _authed_headers():
         result = subprocess.run(["gh", "auth", "token"], capture_output=True, text=True)
     except FileNotFoundError:
         return _base_headers()
-    token = result.stdout.strip()
-    if not token or result.returncode != 0:
+    if result.returncode != 0 or not result.stdout.strip():
         return _base_headers()
+    token = result.stdout.strip()
     return {**_base_headers(), "Authorization": f"Bearer {token}"}
 
 
@@ -78,7 +78,9 @@ def api_get(path, ref, headers):
             return json.loads(data)
     except urllib.error.HTTPError as exc:
         if exc.code == 403 and "Authorization" not in headers:
-            return api_get(path, ref, _authed_headers())
+            authed = _authed_headers()
+            if "Authorization" in authed:
+                return api_get(path, ref, authed)
         raise
 
 
