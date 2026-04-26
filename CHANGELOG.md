@@ -29,7 +29,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **INFO-A14:** Added CC BY 4.0 attribution header to `references/prompts/README.md`
 
 ### Tests
-- Added 9 new unit/integration tests covering all above findings
+- Added 10 new unit/integration tests covering all above findings
 - Test count: 5 → 15
 
 ## [1.9.5] - 2026-04-26

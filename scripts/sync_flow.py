@@ -25,6 +25,8 @@ def _validate_github_url(url):
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme != "https" or parsed.netloc != _ALLOWED_HOST:
         raise ValueError(f"Blocked request to unexpected host: {parsed.netloc!r} (scheme: {parsed.scheme!r})")
+
+
 PROMPT_STAGES = ["find", "leverage", "optimize", "win", "local"]
 STATIC_FILES = [
     ("docs/01-framework/flow-framework.md", "flow-framework.md"),

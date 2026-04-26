@@ -6,7 +6,7 @@ argument-hint: "[command] [url]"
 license: MIT
 metadata:
   author: AgriciDaniel
-  version: "1.9.5"
+  version: "1.9.6"
   category: seo
 ---
 
@@ -17,7 +17,7 @@ metadata:
 **Scripts:** Located at the plugin root `scripts/` directory.
 
 Comprehensive SEO analysis across all industries (SaaS, local services,
-e-commerce, publishers, agencies). Orchestrates 20 specialized sub-skills and 15 subagents
+e-commerce, publishers, agencies). Orchestrates 21 specialized sub-skills and 18 subagents
 (+ 3 optional extension sub-skills: seo-dataforseo, seo-firecrawl, and seo-image-gen).
 
 ## Quick Reference
@@ -171,7 +171,7 @@ Weighted aggregate of all categories:
 
 ## Sub-Skills
 
-This skill orchestrates 20 specialized sub-skills (+ 3 extensions):
+This skill orchestrates 21 specialized sub-skills (+ 3 extensions):
 
 1. **seo-audit** -- Full website audit with parallel delegation
 2. **seo-page** -- Deep single-page analysis

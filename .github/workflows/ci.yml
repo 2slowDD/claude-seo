@@ -48,4 +48,6 @@ jobs:
           python3 -m py_compile scripts/drift_compare.py
           python3 -m py_compile scripts/drift_report.py
           python3 -m py_compile scripts/drift_history.py
-          echo "All 28 scripts passed syntax check"
+          python3 -m py_compile scripts/sync_flow.py
+          python3 -m py_compile scripts/release_report.py
+          echo "All 30 scripts passed syntax check"
