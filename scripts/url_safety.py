@@ -69,6 +69,7 @@ in SECURITY.md.
 from __future__ import annotations
 
 import ipaddress
+import re
 import socket
 import threading
 from contextlib import contextmanager
@@ -87,12 +88,32 @@ except ImportError as exc:  # pragma: no cover - hard dependency
 __all__ = [
     "URLSafetyError",
     "is_safe_ip",
+    "normalize_hostname",
     "validate_url",
     "validate_url_strict",
     "safe_requests_get",
     "safe_requests_session",
     "make_safe_playwright_route_handler",
 ]
+
+
+# Regex matching any glibc / inet_aton-friendly IPv4 obfuscation. This is the
+# allowlist of "looks like a numeric address" forms we want to canonicalize
+# before SSRF policy is applied. Matches:
+#   - dotted-quad (127.0.0.1)
+#   - dotted with leading zeros (127.0.0.001)
+#   - dotted octal (0177.0.0.1)
+#   - dotted hex (0x7f.0.0.1)
+#   - three-part (a.b.c -> a.b.(c & 0xffff))
+#   - two-part (a.b -> a.(b & 0xffffff))
+#   - single integer (decimal/hex/octal: 2130706433, 0x7f000001, 017700000001)
+# Any string matching this regex is normalized through socket.inet_aton, which
+# produces the canonical dotted form (or raises OSError if invalid). Strings
+# that don't match the regex are treated as DNS hostnames.
+_IPV4_OBFUSCATED_RE = re.compile(
+    r"^(?:0x[0-9a-f]+|[0-9]+)(?:\.(?:0x[0-9a-f]+|[0-9]+)){0,3}$",
+    re.IGNORECASE,
+)
 
 
 # Hard-blocked hostnames. Anything here is refused even before DNS resolution.
@@ -127,7 +148,13 @@ class URLSafetyError(ValueError):
 
 
 def is_safe_ip(ip_str: str) -> bool:
-    """Return True iff ``ip_str`` is a public unicast address."""
+    """Return True iff ``ip_str`` is a public unicast address.
+
+    Handles IPv4-mapped IPv6 (``::ffff:127.0.0.1`` correctly returns False
+    because Python 3.9+'s ``ipaddress`` propagates ``is_loopback`` /
+    ``is_private`` through IPv4-mapped form). IPv6 unique-local
+    (``fc00::/7``) and link-local (``fe80::/10``) are also rejected.
+    """
     try:
         ip = ipaddress.ip_address(ip_str)
     except ValueError:
@@ -142,6 +169,50 @@ def is_safe_ip(ip_str: str) -> bool:
     )
 
 
+def normalize_hostname(hostname: str) -> str:
+    """
+    Canonicalize a hostname so that obfuscated forms cannot bypass the
+    SSRF policy. Performs three normalizations:
+
+      1. Lowercase (DNS is case-insensitive).
+      2. Strip a single trailing dot (RFC 1034 FQDN form). Without this,
+         ``metadata.google.internal.`` would bypass the hostname
+         blocklist (which holds exact strings).
+      3. If the result matches an IPv4 obfuscation pattern
+         (decimal integer, hex, octal, leading zeros, short forms),
+         canonicalize via ``socket.inet_aton`` to dotted-quad. This
+         closes the classic SSRF bypass where ``http://2130706433/``
+         (decimal 127.0.0.1), ``http://0x7f000001/``, or
+         ``http://0177.0.0.1/`` would parse as a hostname rather than
+         an IP literal and skip the IP-range check.
+
+    Raises:
+        URLSafetyError if the hostname is empty after normalization, or
+        if an obfuscated form cannot be canonicalized (malformed input).
+    """
+    if not hostname:
+        raise URLSafetyError("Empty hostname")
+
+    h = hostname.lower().strip()
+    # Strip a single trailing dot — FQDN form is semantically identical to
+    # the bare form for the purposes of resolution and policy.
+    if h.endswith(".") and not h.endswith(".."):
+        h = h[:-1]
+
+    if _IPV4_OBFUSCATED_RE.match(h):
+        # inet_aton accepts the same obfuscated forms the glibc resolver
+        # accepts, so canonicalization here matches what getaddrinfo
+        # would produce at connect time.
+        try:
+            packed = socket.inet_aton(h)
+        except OSError as exc:
+            raise URLSafetyError(
+                f"Malformed IPv4 obfuscation refused: {hostname!r} ({exc})"
+            ) from exc
+        h = socket.inet_ntoa(packed)
+    return h
+
+
 def validate_url(url: str) -> bool:
     """
     Back-compat boolean validator. Does not resolve DNS.
@@ -149,18 +220,26 @@ def validate_url(url: str) -> bool:
     Returns False when:
         - Scheme is not http or https
         - Hostname is missing
-        - Hostname is in the hard-block list
-        - Hostname is an IP literal that fails ``is_safe_ip``
-    Returns True for any other well-formed http(s) URL with a public-looking
-    hostname. Use ``validate_url_strict`` if the caller will open a socket
-    using the hostname (DNS rebinding cannot be defeated at parse time).
+        - Hostname normalizes to a hard-block list entry
+          (including FQDN-form metadata endpoints like
+          ``metadata.google.internal.`` and obfuscated IPv4 like
+          ``2130706433`` -> ``127.0.0.1``)
+        - Normalized hostname is an IP literal that fails ``is_safe_ip``
+        - Normalization itself fails (malformed obfuscated input)
+    Returns True for any other well-formed http(s) URL with a
+    public-looking hostname. Use ``validate_url_strict`` whenever the
+    caller will open a socket — only the strict form catches a DNS
+    record that resolves to a non-public IP at connect time.
     """
     parsed = urlparse(url)
     if parsed.scheme not in ("http", "https"):
         return False
     if not parsed.hostname:
         return False
-    hostname = parsed.hostname.lower()
+    try:
+        hostname = normalize_hostname(parsed.hostname)
+    except URLSafetyError:
+        return False
     if hostname in _BLOCKED_HOSTNAMES:
         return False
     try:
@@ -190,7 +269,7 @@ def validate_url_strict(url: str) -> tuple[str, str]:
     if not parsed.hostname:
         raise URLSafetyError("URL has no hostname")
 
-    hostname = parsed.hostname.lower()
+    hostname = normalize_hostname(parsed.hostname)
     if hostname in _BLOCKED_HOSTNAMES:
         raise URLSafetyError(f"Blocked hostname: {hostname}")
 
@@ -392,14 +471,32 @@ def make_safe_playwright_route_handler(
                 return
 
             try:
+                normalized = normalize_hostname(host)
+            except URLSafetyError:
+                route.abort()
+                return
+
+            # Hostname-level blocks short-circuit DNS resolution entirely
+            # (e.g. attacker.example/redirect -> metadata.google.internal).
+            if normalized in _BLOCKED_HOSTNAMES:
+                route.abort()
+                return
+
+            # Dual-stack resolution: Chromium may use IPv6 even when a
+            # host has IPv4 records. AF_UNSPEC returns both families;
+            # any single non-public record aborts the request.
+            try:
                 addrinfo = socket.getaddrinfo(
-                    host, None, family=socket.AF_INET, type=socket.SOCK_STREAM
+                    normalized,
+                    None,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
                 )
             except socket.gaierror:
                 route.abort()
                 return
             ips = {info[4][0] for info in addrinfo}
-            if any(not is_safe_ip(ip) for ip in ips):
+            if not ips or any(not is_safe_ip(ip) for ip in ips):
                 route.abort()
                 return
             route.continue_()

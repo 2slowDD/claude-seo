@@ -189,15 +189,30 @@ def _load_oauth_token() -> Optional[dict]:
 def _save_oauth_token(token_data: dict):
     """Save OAuth token to TOKEN_PATH with secure (0o600) permissions.
 
-    Uses os.open with O_CREAT|O_WRONLY|O_TRUNC and an explicit mode so the
-    file is never world-readable, even briefly between create and chmod.
-    Existing files have their mode forced to 0o600 before truncation.
+    Belt-and-suspenders sequence:
+        1. Pre-chmod any existing file (closes a v1.9.x umask=022 legacy).
+        2. ``os.open`` with explicit mode 0o600 (mode applies only to
+           newly-created files, ignored when the file already exists).
+        3. ``os.fchmod`` on the open fd to *force* 0o600 even if the
+           file pre-existed at step 2 — defeats the
+           os.path.exists()/os.open() TOCTOU race where an external
+           creator could install a 0o644 file between the two calls.
+
+    The token file is never world-readable, even briefly.
     """
     os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
     if os.path.exists(TOKEN_PATH):
         _chmod_quiet(TOKEN_PATH, 0o600)
     flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
     fd = os.open(TOKEN_PATH, flags, 0o600)
+    # fchmod on the open fd guarantees 0o600 even if the file existed at
+    # open time (in which case os.open's mode arg is ignored by the OS).
+    # os.fdopen takes ownership of fd — it closes the fd whether the
+    # write succeeds or raises, so there is no fd-leak path here.
+    try:
+        os.fchmod(fd, 0o600)
+    except OSError:
+        pass  # FS may not support fchmod (e.g. some Windows filesystems)
     with os.fdopen(fd, "w") as f:
         json.dump(token_data, f, indent=2)
 

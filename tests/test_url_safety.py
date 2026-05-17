@@ -27,6 +27,75 @@ import url_safety  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
+# normalize_hostname (v2 self-audit: closes obfuscated-IPv4 + FQDN bypasses)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        # Trailing dot (FQDN form) collapses to bare form so blocklists match
+        ("metadata.google.internal.", "metadata.google.internal"),
+        ("example.com.", "example.com"),
+        # Casing
+        ("Example.COM", "example.com"),
+        # Obfuscated IPv4 — every glibc-accepted form canonicalises
+        ("2130706433", "127.0.0.1"),       # decimal integer
+        ("0x7f000001", "127.0.0.1"),       # hex integer
+        ("017700000001", "127.0.0.1"),     # octal integer
+        ("127.0.0.001", "127.0.0.1"),      # leading zeros
+        ("0177.0.0.1", "127.0.0.1"),       # octal dotted
+        ("0x7f.0.0.1", "127.0.0.1"),       # hex dotted
+        ("127.1", "127.0.0.1"),            # two-part form
+        ("127.0.1", "127.0.0.1"),          # three-part form
+        # Public addresses pass through (verifies normalisation doesn't
+        # accidentally rewrite legitimate IPs)
+        ("1.1.1.1", "1.1.1.1"),
+        ("8.8.8.8", "8.8.8.8"),
+    ],
+)
+def test_normalize_hostname(raw: str, expected: str) -> None:
+    assert url_safety.normalize_hostname(raw) == expected
+
+
+def test_normalize_hostname_rejects_empty() -> None:
+    with pytest.raises(url_safety.URLSafetyError, match="Empty hostname"):
+        url_safety.normalize_hostname("")
+
+
+def test_normalize_hostname_passes_through_dns_names() -> None:
+    assert url_safety.normalize_hostname("example.com") == "example.com"
+    assert url_safety.normalize_hostname("sub.deep.example.org") == "sub.deep.example.org"
+
+
+# ---------------------------------------------------------------------------
+# Obfuscated IPv4 bypass regression — validate_url MUST reject these.
+# Before the v2 self-audit, validate_url returned True for these forms;
+# only validate_url_strict caught them at DNS time. Anyone using the
+# parse-only function as a pre-flight gate would have been vulnerable.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://2130706433/",          # decimal 127.0.0.1
+        "http://0x7f000001/",          # hex 127.0.0.1
+        "http://017700000001/",        # octal 127.0.0.1
+        "http://127.0.0.001/",         # leading zeros
+        "http://0177.0.0.1/",          # octal dotted
+        "http://0x7f.0.0.1/",          # hex dotted
+        "https://metadata.google.internal./",  # FQDN trailing dot
+        "https://METADATA.GOOGLE.INTERNAL/",   # case bypass
+        "http://Metadata.Google.Internal./",   # case + FQDN combined
+    ],
+)
+def test_validate_url_blocks_obfuscated_bypasses(url: str) -> None:
+    """Each of these would have bypassed v1.x parse-mode validation."""
+    assert url_safety.validate_url(url) is False
+
+
+# ---------------------------------------------------------------------------
 # is_safe_ip
 # ---------------------------------------------------------------------------
 
@@ -320,3 +389,103 @@ def test_route_handler_aborts_on_dns_failure() -> None:
         route = _FakeRoute()
         handler(route, _FakeRequest("https://nx.example/"))
         assert route.action == "abort"
+
+
+def test_route_handler_blocks_metadata_via_fqdn_form() -> None:
+    """A redirect or subresource targeting metadata.google.internal. (with
+    trailing dot) is short-circuited before DNS resolution."""
+    handler = url_safety.make_safe_playwright_route_handler()
+    route = _FakeRoute()
+    handler(route, _FakeRequest("http://metadata.google.internal./latest"))
+    assert route.action == "abort"
+
+
+def test_route_handler_blocks_obfuscated_ipv4_in_subresource() -> None:
+    """Chromium might be tricked into fetching http://2130706433/... via a
+    crafted script tag. The route handler normalises the host before
+    resolution."""
+    handler = url_safety.make_safe_playwright_route_handler()
+    route = _FakeRoute()
+    # 2130706433 normalises to 127.0.0.1 which is in the hard-block set.
+    handler(route, _FakeRequest("http://2130706433/exfil"))
+    assert route.action == "abort"
+
+
+def test_route_handler_blocks_when_ipv6_resolution_is_private() -> None:
+    """Dual-stack regression: AF_UNSPEC returns both IPv4 and IPv6. If any
+    record (including an IPv6 ULA) is non-public, abort.
+    """
+    handler = url_safety.make_safe_playwright_route_handler()
+    fake = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("fd00::1", 0, 0, 0)),
+    ]
+    with patch.object(url_safety.socket, "getaddrinfo", return_value=fake):
+        route = _FakeRoute()
+        handler(route, _FakeRequest("https://dualstack.example/"))
+        assert route.action == "abort"
+
+
+def test_route_handler_continues_when_both_ipv4_and_ipv6_public() -> None:
+    handler = url_safety.make_safe_playwright_route_handler()
+    fake = [
+        (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("1.1.1.1", 0)),
+        (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("2606:4700:4700::1111", 0, 0, 0)),
+    ]
+    with patch.object(url_safety.socket, "getaddrinfo", return_value=fake):
+        route = _FakeRoute()
+        handler(route, _FakeRequest("https://safe-dualstack.example/"))
+        assert route.action == "continue"
+
+
+# ---------------------------------------------------------------------------
+# OAuth token file permission hardening (Phase H)
+# ---------------------------------------------------------------------------
+
+
+def test_save_oauth_token_writes_0o600(tmp_path, monkeypatch) -> None:
+    """_save_oauth_token must produce a 0o600 file regardless of whether
+    the path existed beforehand or what the umask is."""
+    import google_auth  # noqa: WPS433
+
+    target = tmp_path / "config" / "oauth-token.json"
+    monkeypatch.setattr(google_auth, "TOKEN_PATH", str(target))
+    # Permissive umask: 0o022 would yield 0o644 without our explicit chmod.
+    old_umask = os.umask(0o022)
+    try:
+        google_auth._save_oauth_token({"access_token": "abc"})
+        mode = target.stat().st_mode & 0o777
+        assert mode == 0o600, f"expected 0o600, got {oct(mode)}"
+    finally:
+        os.umask(old_umask)
+
+
+def test_save_oauth_token_remediates_legacy_0o644(tmp_path, monkeypatch) -> None:
+    """A pre-existing 0o644 token (v1.9.x default) is locked down on save."""
+    import google_auth  # noqa: WPS433
+
+    target = tmp_path / "config" / "oauth-token.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"legacy": true}')
+    os.chmod(target, 0o644)
+    assert target.stat().st_mode & 0o777 == 0o644
+
+    monkeypatch.setattr(google_auth, "TOKEN_PATH", str(target))
+    google_auth._save_oauth_token({"access_token": "new"})
+    assert target.stat().st_mode & 0o777 == 0o600
+
+
+def test_load_oauth_token_remediates_legacy_0o644(tmp_path, monkeypatch) -> None:
+    """_load_oauth_token chmods the file before reading, so the next read
+    by any other process sees 0o600 even without a re-save."""
+    import google_auth  # noqa: WPS433
+
+    target = tmp_path / "config" / "oauth-token.json"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('{"access_token": "x"}')
+    os.chmod(target, 0o644)
+
+    monkeypatch.setattr(google_auth, "TOKEN_PATH", str(target))
+    data = google_auth._load_oauth_token()
+    assert data == {"access_token": "x"}
+    assert target.stat().st_mode & 0o777 == 0o600
