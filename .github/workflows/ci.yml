@@ -62,7 +62,11 @@ jobs:
           python3 -m py_compile scripts/content_verify.py
           python3 -m py_compile scripts/domain_history.py
           python3 -m py_compile scripts/seo_updates.py
-          echo "All 39 scripts passed syntax check"
+          python3 -m py_compile scripts/preload_check.py
+          python3 -m py_compile scripts/indexnow_submit.py
+          python3 -m py_compile scripts/lcp_subparts.py
+          python3 -m py_compile scripts/unlighthouse_run.py
+          echo "All 43 scripts passed syntax check"
 
   test:
     name: Test suite (manifests + sync_flow)
