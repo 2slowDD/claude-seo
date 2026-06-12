@@ -55,6 +55,49 @@ def _build_gsc_service():
         return None
 
 
+def _query_site_totals(
+    service,
+    site_url: str,
+    start_date: str,
+    end_date: str,
+    search_type: str,
+    data_state: str,
+    filters: Optional[list],
+) -> Optional[dict]:
+    """Fetch true site-wide totals via a dimensionless query.
+
+    GSC anonymizes click data for low-volume ("rare") queries, so summing
+    the per-query rows undercounts clicks (often to exactly 0) and
+    impressions. A query with an empty ``dimensions`` array returns a
+    single aggregate row carrying the real site totals (issue #130).
+    Returns ``None`` if the aggregate query fails (caller falls back).
+    """
+    body = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "dimensions": [],
+        "type": search_type,
+        "rowLimit": 1,
+        "dataState": data_state,
+    }
+    if filters:
+        body["dimensionFilterGroups"] = [{"filters": filters}]
+    try:
+        response = service.searchanalytics().query(siteUrl=site_url, body=body).execute()
+    except Exception:
+        return None
+    rows = response.get("rows", [])
+    if not rows:
+        return {"clicks": 0, "impressions": 0, "ctr": 0, "position": 0}
+    agg = rows[0]
+    return {
+        "clicks": agg.get("clicks", 0),
+        "impressions": agg.get("impressions", 0),
+        "ctr": round(agg.get("ctr", 0) * 100, 2),
+        "position": round(agg.get("position", 0), 1),
+    }
+
+
 def query_search_analytics(
     site_url: str,
     start_date: Optional[str] = None,
@@ -189,10 +232,22 @@ def query_search_analytics(
         total_impressions += impressions
 
     result["row_count"] = len(all_rows)
-    result["totals"]["clicks"] = total_clicks
-    result["totals"]["impressions"] = total_impressions
-    if total_impressions > 0:
-        result["totals"]["ctr"] = round((total_clicks / total_impressions) * 100, 2)
+
+    # Site totals come from a dimensionless aggregate query, NOT from summing
+    # the per-dimension rows. Summing query-dimension rows undercounts clicks
+    # because GSC anonymizes low-volume queries, producing a false "0 clicks"
+    # site total (issue #130). Fall back to the row sum only if the aggregate
+    # query fails.
+    site_totals = _query_site_totals(
+        service, site_url, start_date, end_date, search_type, data_state, filters
+    )
+    if site_totals is not None:
+        result["totals"] = site_totals
+    else:
+        result["totals"]["clicks"] = total_clicks
+        result["totals"]["impressions"] = total_impressions
+        if total_impressions > 0:
+            result["totals"]["ctr"] = round((total_clicks / total_impressions) * 100, 2)
 
     # Quick wins: position 4-10 with high impressions
     if "query" in dimensions:
