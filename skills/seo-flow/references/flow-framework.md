@@ -7,7 +7,7 @@ tags:
   - framework
 ---
 
-![FLOW Operating Loop](../../assets/diagrams/flow-v4-flow-loop.png)
+![Claude SEO 10-principle methodology: PERCEIVE, ANALYZE, VALIDATE, ACT](../../../assets/framework.svg)
 
 # FLOW Framework
 
